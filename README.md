@@ -76,13 +76,6 @@ Tampermonkey 默认每天检查一次更新。
 
 ---
 
-## 🧑‍💻 作者 / Auteur / Author
-
-**Lipu (Ren Lipu)**  
-GitHub : [@dwzrlp](https://github.com/dwzrlp)
-
----
-
 ## 📝 更新日志 / Journal des versions / Changelog
 
 ### v1.4.4 – 2025-11

@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Cdiscount 订单搜索（黑色简洁版｜图标+多语言+关键词过滤+订单号跳转）
+// @name         Cdiscount 订单搜索（黑色简洁版｜图标+多语言+关键词过滤+订单号直达）
 // @namespace    https://github.com/dwzrlp/tampermonkey-cdiscount-order-search
-// @version      1.4.4
-// @description  在“Mes commandes”页添加一个黑色搜索栏：带图标，中等高度；支持关键词过滤、订单号直达、清空恢复、长按刷新，多语言自动切换，无额外文字提示，更简洁。
-// @author       Lipu
+// @version      1.4.5
+// @description  在“Mes commandes”等页面添加黑色搜索栏：带图标，支持关键词过滤与订单号直达；多语言自动切换；清空恢复/长按刷新；针对 account/home.html 定点插入到 myLastOrderTitle 后面。
+// @author       HyperNovaSigma
 // @match        *://*.cdiscount.fr/*
 // @match        *://*.cdiscount.com/*
 // @run-at       document-idle
@@ -26,8 +26,12 @@
     const lang = (navigator.language || "en").toLowerCase();
     const L = lang.startsWith("zh") ? i18n.zh : lang.startsWith("fr") ? i18n.fr : i18n.en;
 
-    // —— 启用条件 —— //
+    const isHomeAccount = () =>
+        /clients\.cdiscount\.com\/account\/home\.html/i.test(location.href);
+
+    // —— 启用条件（含 account/home.html） —— //
     const isOrderPage = () => {
+        if (isHomeAccount()) return true;
         const u = location.href.toLowerCase();
         const t = (document.body.innerText || "").toLowerCase();
         return /mes-?commandes|commande|orderhistory|suivi-?commande/.test(u) ||
@@ -100,9 +104,26 @@
 
     function insertBar() {
         if (document.querySelector(".cdbar")) return;
-        const anchor = [...document.querySelectorAll("h1,h2,[role='heading']")].find(h => /mes commandes/i.test(h.textContent || ""));
-        const container = anchor?.parentElement || document.querySelector("main") || document.body;
 
+        let insertAfterEl = null;
+
+        if (isHomeAccount()) {
+            // 精确：<div class="myLastOrderTitle"><h2>Ma dernière commande</h2></div> 后面
+            const block = document.querySelector(".myLastOrderTitle");
+            const h2ok = block?.querySelector("h2") && /ma dernière commande/i.test(block.textContent || "");
+            if (block && h2ok) {
+                insertAfterEl = block; // 稍后将插到它的 nextSibling 位置
+            }
+        }
+
+        // 兜底：非 home.html 或未找到上述块时，仍插在“Mes commandes”标题后或 main 顶部
+        if (!insertAfterEl) {
+            const anchor = [...document.querySelectorAll("h1,h2,[role='heading']")]
+                .find(h => /mes commandes|mes commandes|mes commandes/i.test((h.textContent || "").toLowerCase()));
+            insertAfterEl = anchor?.parentElement || document.querySelector("main") || document.body;
+        }
+
+        // 构建工具条
         const bar = document.createElement("div");
         bar.className = "cdbar";
         bar.innerHTML = `
@@ -123,8 +144,21 @@
         <span>${L.reset}</span>
       </button>
     `;
-        if (anchor && anchor.nextSibling) anchor.parentElement.insertBefore(bar, anchor.nextSibling);
-        else container.prepend(bar);
+
+        // 插入位置：如果是 home.html 且找到了 myLastOrderTitle，则紧跟其后；否则默认 prepend 到容器
+        if (isHomeAccount()) {
+            const parent = insertAfterEl?.parentElement || document.querySelector("main") || document.body;
+            if (insertAfterEl && parent) {
+                if (insertAfterEl.nextSibling) parent.insertBefore(bar, insertAfterEl.nextSibling);
+                else parent.appendChild(bar);
+            } else {
+                parent.prepend(bar);
+            }
+        } else {
+            // 非 home.html 的常规插入
+            const container = insertAfterEl || document.querySelector("main") || document.body;
+            container.prepend(bar);
+        }
 
         const $q = bar.querySelector("#cdbar-q");
         const $search = bar.querySelector("#cdbar-search");
@@ -162,6 +196,7 @@
         });
         $q.addEventListener("input", () => { if ($q.value === "") restoreAll(); });
 
+        // 长按重置 = 刷新（保险）
         let timer;
         $reset.addEventListener("mousedown", () => timer = setTimeout(() => location.reload(), 1000));
         ["mouseup","mouseleave"].forEach(ev => $reset.addEventListener(ev, () => clearTimeout(timer)));
