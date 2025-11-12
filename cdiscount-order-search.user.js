@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cdiscount 订单搜索（黑色简洁版｜图标+多语言+关键词过滤+订单号直达）
 // @namespace    https://github.com/dwzrlp/tampermonkey-cdiscount-order-search
-// @version      1.4.5
-// @description  在“Mes commandes”等页面添加黑色搜索栏：带图标，支持关键词过滤与订单号直达；多语言自动切换；清空恢复/长按刷新；针对 account/home.html 定点插入到 myLastOrderTitle 后面。
+// @version      1.4.6
+// @description  在“Mes commandes”等页面添加黑色搜索栏：带图标，支持关键词过滤与订单号直达；多语言自动切换；清空恢复/长按刷新；针对 account/home.html 精准插入到 .myLastOrderTitle 后面，带自动等待与DOM监听。
 // @author       HyperNovaSigma
 // @match        *://*.cdiscount.fr/*
 // @match        *://*.cdiscount.com/*
@@ -26,8 +26,7 @@
     const lang = (navigator.language || "en").toLowerCase();
     const L = lang.startsWith("zh") ? i18n.zh : lang.startsWith("fr") ? i18n.fr : i18n.en;
 
-    const isHomeAccount = () =>
-        /clients\.cdiscount\.com\/account\/home\.html/i.test(location.href);
+    const isHomeAccount = () => /clients\.cdiscount\.com\/account\/home\.html/i.test(location.href);
 
     // —— 启用条件（含 account/home.html） —— //
     const isOrderPage = () => {
@@ -39,8 +38,179 @@
     };
     if (!isOrderPage()) return;
 
-    // —— 样式（黑色·简洁·图标） —— //
-    GM_addStyle(`
+    // —— 样式 —— //
+    GM_AddStyles();
+
+    // —— 工具函数 —— //
+    const norm = (s) => (s || "").toString().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().trim();
+
+    function findOrderCards() {
+        return [...document.querySelectorAll("div,section,article,li")]
+            .filter(el =>
+                el.offsetHeight > 100 &&
+                /(commande du|voir le d[ée]tail|voir ma commande|€|quantit[ée]|livr[ée]|annul[ée]e)/i.test(el.innerText || "")
+            )
+            .slice(0, 400);
+    }
+
+    // 等待选择器出现（带超时）+ MutationObserver
+    function waitForSelector(selector, { timeout = 10000, root = document } = {}) {
+        return new Promise((resolve) => {
+            const found = root.querySelector(selector);
+            if (found) return resolve(found);
+
+            const obs = new MutationObserver(() => {
+                const el = root.querySelector(selector);
+                if (el) {
+                    obs.disconnect();
+                    resolve(el);
+                }
+            });
+            obs.observe(root, { childList: true, subtree: true });
+
+            setTimeout(() => {
+                obs.disconnect();
+                resolve(null);
+            }, timeout);
+        });
+    }
+
+    function createBar() {
+        const bar = document.createElement("div");
+        bar.className = "cdbar";
+        bar.innerHTML = `
+      <div class="cdbar-field">
+        <svg class="cdbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="#c7d2fe" d="M10 2a8 8 0 105.3 14.3l4.7 4.7 1.4-1.4-4.7-4.7A8 8 0 0010 2zm0 2a6 6 0 110 12A6 6 0 0110 4z"/>
+        </svg>
+        <input id="cdbar-q" class="cdbar-input" type="text" placeholder="${L.placeholder}" />
+      </div>
+
+      <button id="cdbar-search" class="cdbar-btn" title="${L.search}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 2a8 8 0 105.3 14.3l4.7 4.7 1.4-1.4-4.7-4.7A8 8 0 0010 2zm0 2a6 6 0 110 12A6 6 0 0110 4z"/></svg>
+        <span>${L.search}</span>
+      </button>
+
+      <button id="cdbar-reset" class="cdbar-btn reset" title="${L.reset}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.8 0 5 2.2 5 5a5 5 0 11-8.5-3.5l-1.4-1.4A7 7 0 1019 13c0-3.9-3.1-7-7-7z"/></svg>
+        <span>${L.reset}</span>
+      </button>
+    `;
+        return bar;
+    }
+
+    function mountBarAfter(target) {
+        if (!target) return false;
+        if (document.querySelector(".cdbar")) return true; // 已存在
+        const bar = createBar();
+        const parent = target.parentElement || document.querySelector("main") || document.body;
+        if (target.nextSibling) parent.insertBefore(bar, target.nextSibling);
+        else parent.appendChild(bar);
+        bindBarEvents(bar);
+        return true;
+    }
+
+    function mountFallback() {
+        if (document.querySelector(".cdbar")) return true;
+        const anchor = [...document.querySelectorAll("h1,h2,[role='heading']")]
+            .find(h => /mes commandes|mes commande|mes\s+commandes/i.test((h.textContent || "").toLowerCase()));
+        const container = anchor?.parentElement || document.querySelector("main") || document.body;
+        const bar = createBar();
+        container.prepend(bar);
+        bindBarEvents(bar);
+        return true;
+    }
+
+    function bindBarEvents(bar) {
+        const $q = bar.querySelector("#cdbar-q");
+        const $search = bar.querySelector("#cdbar-search");
+        const $reset = bar.querySelector("#cdbar-reset");
+
+        function restoreAll() {
+            document.querySelectorAll(".cdbar-hidden").forEach(n => n.classList.remove("cdbar-hidden"));
+            document.querySelectorAll(".cdbar-highlight").forEach(n => n.classList.remove("cdbar-highlight"));
+        }
+
+        function doSearch() {
+            const raw = $q.value.trim();
+            const q = norm(raw);
+
+            // 订单号直达
+            if (/^[a-z0-9\-]{6,}$/i.test(raw)) {
+                location.href = `https://clients.cdiscount.com/DisplayOrderTrackingByScopusId/${raw}.html`;
+                return;
+            }
+            if (!q) return restoreAll();
+
+            const terms = q.split(/\s+/).filter(Boolean);
+            const cards = findOrderCards();
+            cards.forEach(el => {
+                const ok = terms.every(t => norm(el.innerText).includes(t));
+                el.classList.toggle("cdbar-hidden", !ok);
+                el.classList.toggle("cdbar-highlight", ok);
+            });
+        }
+
+        $search.addEventListener("click", doSearch);
+        $reset.addEventListener("click", restoreAll);
+        $q.addEventListener("keydown", e => {
+            if (e.key === "Enter") doSearch();
+            if (e.key === "Escape") { $q.value = ""; restoreAll(); }
+        });
+        $q.addEventListener("input", () => { if ($q.value === "") restoreAll(); });
+
+        // 长按重置 = 刷新（保险）
+        let timer;
+        $reset.addEventListener("mousedown", () => timer = setTimeout(() => location.reload(), 1000));
+        ["mouseup","mouseleave"].forEach(ev => $reset.addEventListener(ev, () => clearTimeout(timer)));
+    }
+
+    async function boot() {
+        if (!document.body) return;
+
+        // 1) 若是 account/home.html：等待 .myLastOrderTitle 出现后插入其后
+        if (isHomeAccount()) {
+            const block = await waitForSelector(".myLastOrderTitle", { timeout: 10000 });
+            if (block) {
+                // 可选校验：h2 文本包含 “Ma dernière commande”（忽略重音/大小写）
+                const txt = norm(block.textContent || "");
+                if (/ma derniere commande/.test(txt)) {
+                    mountBarAfter(block);
+                    return;
+                }
+                // 即使未匹配到法语文案，也照样插入
+                mountBarAfter(block);
+                return;
+            }
+            // 超时兜底
+            mountFallback();
+            return;
+        }
+
+        // 2) 其它订单相关页面：直接常规插入（仍可被 SPA 导航触发多次，已做幂等）
+        mountFallback();
+
+        // 3) 监听 SPA/异步变化：若后续加载了目标区域且尚未插入，则补插一次
+        const mo = new MutationObserver(() => {
+            if (!document.querySelector(".cdbar")) {
+                const candidate = document.querySelector(".myLastOrderTitle");
+                if (candidate) mountBarAfter(candidate);
+            }
+        });
+        mo.observe(document.documentElement, { childList: true, subtree: true });
+        // 注：如果你担心性能，可在成功插入后 mo.disconnect()。这里保持监听以防页面替换。
+    }
+
+    // —— 启动 —— //
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", boot);
+    } else {
+        boot();
+    }
+
+    // —— 样式注入函数 —— //
+    function GM_AddStyles() {
+        const css = `
     .cdbar {
       display: flex; align-items: center; gap: 8px;
       background: rgba(0,0,0,0.85);
@@ -74,7 +244,6 @@
       font-size: 13.5px;
     }
     .cdbar-input::placeholder { color: #a1a1aa; }
-
     .cdbar-btn {
       display: inline-flex; align-items: center; gap: 6px;
       padding: 7px 12px;
@@ -91,117 +260,12 @@
 
     .cdbar-hidden { display: none!important; }
     .cdbar-highlight { outline: 2px solid rgba(59,130,246,.85); border-radius: 6px; }
-  `);
-
-    // —— 功能 —— //
-    const norm = (s) => (s || "").toString().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().trim();
-
-    function findOrderCards() {
-        return [...document.querySelectorAll("div,section,article,li")]
-            .filter(el => el.offsetHeight > 100 && /(commande du|voir le d[ée]tail|voir ma commande|€|quantit[ée]|livr[ée]|annul[ée]e)/i.test(el.innerText || ""))
-            .slice(0, 400);
-    }
-
-    function insertBar() {
-        if (document.querySelector(".cdbar")) return;
-
-        let insertAfterEl = null;
-
-        if (isHomeAccount()) {
-            // 精确：<div class="myLastOrderTitle"><h2>Ma dernière commande</h2></div> 后面
-            const block = document.querySelector(".myLastOrderTitle");
-            const h2ok = block?.querySelector("h2") && /ma dernière commande/i.test(block.textContent || "");
-            if (block && h2ok) {
-                insertAfterEl = block; // 稍后将插到它的 nextSibling 位置
-            }
-        }
-
-        // 兜底：非 home.html 或未找到上述块时，仍插在“Mes commandes”标题后或 main 顶部
-        if (!insertAfterEl) {
-            const anchor = [...document.querySelectorAll("h1,h2,[role='heading']")]
-                .find(h => /mes commandes|mes commandes|mes commandes/i.test((h.textContent || "").toLowerCase()));
-            insertAfterEl = anchor?.parentElement || document.querySelector("main") || document.body;
-        }
-
-        // 构建工具条
-        const bar = document.createElement("div");
-        bar.className = "cdbar";
-        bar.innerHTML = `
-      <div class="cdbar-field">
-        <svg class="cdbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path fill="#c7d2fe" d="M10 2a8 8 0 105.3 14.3l4.7 4.7 1.4-1.4-4.7-4.7A8 8 0 0010 2zm0 2a6 6 0 110 12A6 6 0 0110 4z"/>
-        </svg>
-        <input id="cdbar-q" class="cdbar-input" type="text" placeholder="${L.placeholder}" />
-      </div>
-
-      <button id="cdbar-search" class="cdbar-btn" title="${L.search}">
-        <svg viewBox="0 0 24 24"><path fill="currentColor" d="M10 2a8 8 0 105.3 14.3l4.7 4.7 1.4-1.4-4.7-4.7A8 8 0 0010 2zm0 2a6 6 0 110 12A6 6 0 0110 4z"/></svg>
-        <span>${L.search}</span>
-      </button>
-
-      <button id="cdbar-reset" class="cdbar-btn reset" title="${L.reset}">
-        <svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 6V3L8 7l4 4V8c2.8 0 5 2.2 5 5a5 5 0 11-8.5-3.5l-1.4-1.4A7 7 0 1019 13c0-3.9-3.1-7-7-7z"/></svg>
-        <span>${L.reset}</span>
-      </button>
     `;
-
-        // 插入位置：如果是 home.html 且找到了 myLastOrderTitle，则紧跟其后；否则默认 prepend 到容器
-        if (isHomeAccount()) {
-            const parent = insertAfterEl?.parentElement || document.querySelector("main") || document.body;
-            if (insertAfterEl && parent) {
-                if (insertAfterEl.nextSibling) parent.insertBefore(bar, insertAfterEl.nextSibling);
-                else parent.appendChild(bar);
-            } else {
-                parent.prepend(bar);
-            }
-        } else {
-            // 非 home.html 的常规插入
-            const container = insertAfterEl || document.querySelector("main") || document.body;
-            container.prepend(bar);
+        if (typeof GM_addStyle === "function") GM_addStyle(css);
+        else {
+            const style = document.createElement("style");
+            style.textContent = css;
+            document.head.appendChild(style);
         }
-
-        const $q = bar.querySelector("#cdbar-q");
-        const $search = bar.querySelector("#cdbar-search");
-        const $reset = bar.querySelector("#cdbar-reset");
-
-        function restoreAll() {
-            document.querySelectorAll(".cdbar-hidden").forEach(n => n.classList.remove("cdbar-hidden"));
-            document.querySelectorAll(".cdbar-highlight").forEach(n => n.classList.remove("cdbar-highlight"));
-        }
-
-        function doSearch() {
-            const raw = $q.value.trim();
-            const q = norm(raw);
-
-            if (/^[a-z0-9\-]{6,}$/i.test(raw)) {
-                window.open(`https://clients.cdiscount.com/DisplayOrderTrackingByScopusId/${raw}.html`, "_blank");
-                return;
-            }
-            if (!q) return restoreAll();
-
-            const terms = q.split(/\s+/).filter(Boolean);
-            const cards = findOrderCards();
-            cards.forEach(el => {
-                const ok = terms.every(t => norm(el.innerText).includes(t));
-                el.classList.toggle("cdbar-hidden", !ok);
-                el.classList.toggle("cdbar-highlight", ok);
-            });
-        }
-
-        $search.addEventListener("click", doSearch);
-        $reset.addEventListener("click", restoreAll);
-        $q.addEventListener("keydown", e => {
-            if (e.key === "Enter") doSearch();
-            if (e.key === "Escape") { $q.value = ""; restoreAll(); }
-        });
-        $q.addEventListener("input", () => { if ($q.value === "") restoreAll(); });
-
-        // 长按重置 = 刷新（保险）
-        let timer;
-        $reset.addEventListener("mousedown", () => timer = setTimeout(() => location.reload(), 1000));
-        ["mouseup","mouseleave"].forEach(ev => $reset.addEventListener(ev, () => clearTimeout(timer)));
     }
-
-    if (document.body) insertBar();
-    else document.addEventListener("DOMContentLoaded", insertBar);
 })();
