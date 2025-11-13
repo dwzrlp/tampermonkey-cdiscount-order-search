@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Cdiscount 订单搜索（黑色简洁版｜图标+多语言+关键词过滤+订单号直达）
 // @namespace    https://github.com/dwzrlp/tampermonkey-cdiscount-order-search
-// @version      1.4.6
+// @version      1.4.7
 // @description  在“Mes commandes”等页面添加黑色搜索栏：带图标，支持关键词过滤与订单号直达；多语言自动切换；清空恢复/长按刷新；针对 account/home.html 精准插入到 .myLastOrderTitle 后面，带自动等待与DOM监听。
 // @author       HyperNovaSigma
 // @match        *://*.cdiscount.fr/*
 // @match        *://*.cdiscount.com/*
 // @run-at       document-idle
 // @grant        GM_addStyle
+// @icon         https://www.cdiscount.com/favicon.ico
 // @homepageURL  https://github.com/dwzrlp/tampermonkey-cdiscount-order-search
 // @supportURL   https://github.com/dwzrlp/tampermonkey-cdiscount-order-search/issues
 // @downloadURL  https://raw.githubusercontent.com/dwzrlp/tampermonkey-cdiscount-order-search/refs/heads/main/cdiscount-order-search.user.js
